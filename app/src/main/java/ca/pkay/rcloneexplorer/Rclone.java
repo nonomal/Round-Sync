@@ -38,6 +38,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -46,10 +47,12 @@ import java.util.zip.ZipOutputStream;
 import ca.pkay.rcloneexplorer.Database.json.Exporter;
 import ca.pkay.rcloneexplorer.Database.json.SharedPreferencesBackup;
 import ca.pkay.rcloneexplorer.Items.FileItem;
+import ca.pkay.rcloneexplorer.Items.FilterEntry;
 import ca.pkay.rcloneexplorer.Items.RemoteItem;
 import ca.pkay.rcloneexplorer.Items.SyncDirectionObject;
 import ca.pkay.rcloneexplorer.rclone.Provider;
 import ca.pkay.rcloneexplorer.util.FLog;
+import ca.pkay.rcloneexplorer.util.SyncLog;
 import es.dmoral.toasty.Toasty;
 import io.github.x0b.safdav.SafAccessProvider;
 import io.github.x0b.safdav.SafDAVServer;
@@ -224,7 +227,9 @@ public class Rclone {
             }
             return;
         }
-        log2File.log(stringBuilder.toString());
+        String logOutput = stringBuilder.toString();
+        log2File.log(logOutput);
+        SyncLog.error(context, "Rclone operation", logOutput);
     }
 
     @Nullable
@@ -260,7 +265,7 @@ public class Rclone {
         }
         String[] env = getRcloneEnv();
         JSONArray results;
-        Process process;
+        Process process = null;
         try {
             FLog.d(TAG, "getDirectoryContent[ENV]: %s", Arrays.toString(env));
             process = getRuntimeProcess(command, env);
@@ -283,9 +288,11 @@ public class Rclone {
             results = new JSONArray(outputStr);
 
         } catch (InterruptedException e) {
+            logErrorOutput(process);
             FLog.d(TAG, "getDirectoryContent: Aborted refreshing folder");
             return null;
         } catch (IOException | JSONException e) {
+            logErrorOutput(process);
             FLog.e(TAG, "getDirectoryContent: Could not get folder content", e);
             return null;
         }
@@ -313,6 +320,7 @@ public class Rclone {
                 FileItem fileItem = new FileItem(remote, filePath, fileName, fileSize, fileModTime, mimeType, fileIsDir, startAtRoot);
                 fileItemList.add(fileItem);
             } catch (JSONException e) {
+                logErrorOutput(process);
                 FLog.e(TAG, "getDirectoryContent: Could not decode JSON", e);
                 return null;
             }
@@ -323,7 +331,7 @@ public class Rclone {
     public List<RemoteItem> getRemotes() {
         String[] command = createCommand("config", "dump");
         StringBuilder output = new StringBuilder();
-        Process process;
+        Process process = null;
         JSONObject remotesJSON;
         SharedPreferences sharedPreferences = PreferenceManager.getDefaultSharedPreferences(context);
         Set<String> pinnedRemotes = sharedPreferences.getStringSet(context.getString(R.string.shared_preferences_pinned_remotes), new HashSet<>());
@@ -346,6 +354,7 @@ public class Rclone {
 
             remotesJSON = new JSONObject(output.toString());
         } catch (IOException | InterruptedException | JSONException e) {
+            logErrorOutput(process);
             FLog.e(TAG, "getRemotes: error retrieving remotes", e);
             return new ArrayList<>();
         }
@@ -387,6 +396,7 @@ public class Rclone {
 
                 remoteItemList.add(newRemote);
             } catch (JSONException e) {
+                logErrorOutput(process);
                 FLog.e(TAG, "getRemotes: error decoding remotes", e);
                 return new ArrayList<>();
             }
@@ -669,10 +679,10 @@ public class Rclone {
      */
     @Deprecated
     public Process sync(RemoteItem remoteItem, String localPath, String remotePath, int syncDirection) {
-        return sync(remoteItem, localPath, remotePath, syncDirection, false);
+        return sync(remoteItem, localPath, remotePath, syncDirection, false, new ArrayList<>(0), false);
     }
 
-    public Process sync(RemoteItem remoteItem, String localPath, String remotePath, int syncDirection, boolean useMD5Sum) {
+    public Process sync(RemoteItem remoteItem, String localPath, String remotePath, int syncDirection, boolean useMD5Sum, ArrayList<FilterEntry> filters, boolean deleteExcluded) {
         String[] command;
         String remoteName = remoteItem.getName();
         String localRemotePath = (remoteItem.isRemoteType(RemoteItem.LOCAL)) ? getLocalRemotePathPrefix(remoteItem, context)  + "/" : "";
@@ -683,6 +693,14 @@ public class Rclone {
 
         if(useMD5Sum){
             defaultParameter.add("--checksum");
+        }
+        if(deleteExcluded){
+            defaultParameter.add("--delete-excluded");
+        }
+
+        for (FilterEntry filter : filters) {
+            defaultParameter.add("--filter");
+            defaultParameter.add((filter.filterType == FilterEntry.FILTER_INCLUDE ? "+ " : "- ") + filter.filter);
         }
 
         if (syncDirection == SyncDirectionObject.SYNC_LOCAL_TO_REMOTE) {
